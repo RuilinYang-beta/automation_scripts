@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@fast-csv/format": "^4.3.5",
     "axios": "^0.25.0",
     "cheerio": "^1.0.0-rc.10"
   }

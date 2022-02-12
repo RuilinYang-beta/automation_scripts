@@ -19,134 +19,109 @@ const selector = require("./selector");
 const CONSOLE = "[Nintendo Switch]";
 const baseURL = "https://www.buecherhallen.de/";
 const pageURL = "katalog-suchergebnisse.html";
-const gameRecords = {}; // {gameTitle: gameURL}
+// the delay between scraping pages
+// limit the number of concurrent request to the server
+const DELAY_MIN = 15000; // min delay is 15 seconds
+const DELAY_MAX = 25000; // max delay is 25 seconds
 const gameAvailInfo = [];
 let totalPage;
 
+// --------------------------------- new ---------------------------------
+
 axios
-  // 0. fire init req
   .get(`${baseURL}${pageURL}`, {
     params: {
       suchbegriff: CONSOLE,
     },
   })
-  // 1. get total page, and record game urls on first page
+  // get total page
   .then((response) => {
     const $ = getParsedPage(response);
-    _recordGameURLOnPage($);
-    totalPage = _getTotalPages($);
-    return totalPage;
+    totalPage = getTotalPages($);
+    return $;
   })
-  // 2. prep and fire reqs to get game urls on the rest pages
-  .then((totalPage) => {
-    // const restPageReqs = makeRestPageReqs(totalPage);
-    // it's likely that there is a quota nr. of request per ip can send in a period of time
-    const restPageReqs = makeRestPageReqs(5);
-    return axios.all(restPageReqs);
+  // prep to fire query on the games on this page
+  .then(($) => {
+    const gameURLs = getGameURLsOnPage($);
+    const reqs = getAxiosFromGameURLs(gameURLs);
+
+    return Promise.all(reqs);
   })
-  // 3. record game urls from axios response
-  .then((responses) => {
-    return new Promise((resolve, reject) => {
-      responses.forEach((resp) => {
-        _recordGameURLOnPage(getParsedPage(resp));
-      });
-      resolve(gameRecords);
+  // parse, check, and write game if available
+  .then((gamePages) => {
+    gamePages.forEach((gamePage) => {
+      recordAvailableGame(gamePage);
     });
   })
-  // 4. prep and fire reqs to check all games
-  .then(() => {
-    // why nr. of records differ each time????
-    const nrGame = Object.keys(gameRecords).length;
-    console.log(`collected ${nrGame} games`);
-
-    // write to csv
-    // prepare file write stream
-    const fileName = "availableGames.csv";
-    const csvFile = fs.createWriteStream(fileName);
-    // prepare csv config
-    const csvStream = format({ headers: true });
-    csvStream.pipe(csvFile).on("end", () => process.exit());
-
-    for (let key in gameRecords) {
-      // send an axios req per 1 seconds
-      setTimeout(() => {
-        _checkOneGame(key, gameRecords[key], csvStream);
-      }, 1000);
-    }
-
-    // why this function never get executed????
-    setTimeout(() => {
-      console.log(`ending csv stream...`);
-      csvStream.end();
-    }, 1500 * nrGame);
-  })
-  // // 3. record available game info
-  // .then(() => {
-  //   checkAllGames();
-  // })
   .catch((error) => {
-    if (error.isAxiosError) {
-      console.log(`outer err: ${error.config.params}`);
-      console.log(`outer err: ${error.config.url}`);
-      console.log(
-        `outer err: ${error.response.status}: ${error.response.statusText}`
-      );
+    handleError(error);
+  })
+  .finally(() => {
+    if (totalPage >= 2) {
+      scrapeNextPage(2, totalPage);
     }
   });
 
-// ------------ check availability of games ------------
-const _checkOneGame = (title, url, writer) => {
+// ---------- deal with rest pages ----------
+const scrapeNextPage = (currentPage, totalPage) => {
+  const randomDelay = getRandomMillisec(DELAY_MIN, DELAY_MAX);
+  console.log(
+    `wait ${randomDelay} millisec before scraping page ${currentPage}`
+  );
+  setTimeout(() => {
+    scrapePromise(currentPage, totalPage);
+  }, randomDelay);
+};
+
+const getRandomMillisec = (min, max) => {
+  return Math.floor(Math.random() * (max - min) + min);
+};
+
+const scrapePromise = (currentPage, totalPage) => {
+  console.log(`attempt to scrape page ${currentPage}...`);
   axios
-    .get(`${baseURL}${url}`)
+    .get(`${baseURL}${pageURL}`, {
+      params: {
+        suchbegriff: CONSOLE,
+        "seite-m37": currentPage,
+      },
+    })
     .then((response) => {
-      const $ = getParsedPage(response);
-      const availLibraries = $(selector["availLibraries"]);
-      if (availLibraries.length !== 0) {
-        console.log(`game ${title} has >= 1 available copy!`);
-        availLibraries.each((i, ele) => {
-          _writeARow($, ele, `${baseURL}${url}`, writer);
-        });
-      }
+      return getParsedPage(response);
+    })
+    // prep to fire query on the games on this page
+    .then(($) => {
+      const gameURLs = getGameURLsOnPage($);
+      const reqs = getAxiosFromGameURLs(gameURLs);
+      return Promise.all(reqs);
+    })
+    // parse, check, and write game if available
+    .then((gamePages) => {
+      gamePages.forEach((gamePage) => {
+        recordAvailableGame(gamePage);
+      });
     })
     .catch((error) => {
+      handleError(error);
+    })
+    .finally(() => {
       console.log(
-        `error at ${baseURL}${url}, the ${Object.values(gameRecords).indexOf(
-          url
-        )}-th game of all`
+        `scraped page ${currentPage}, ${gameAvailInfo.length} games now`
       );
-      if (error.isAxiosError) {
+      currentPage += 1;
+      if (currentPage <= totalPage) {
+        scrapeNextPage(currentPage, totalPage);
+      } else {
+        // scrape finished, write to csv
         console.log(
-          `inner err: ${error.response.status}: ${error.response.statusText}`
+          `finish: ${gameAvailInfo.length} game copies over ${totalPage} pages.`
         );
+        writeCSV(gameAvailInfo);
       }
     });
 };
 
-const _writeARow = ($, ele, link, writer) => {
-  const title = $(selector["title"]).text();
-  const url = link;
-  const library = $(ele).find(selector["library"]).text();
-  const availableCopy = $(ele).find(selector["availableCopy"]).text();
-  const totalCopy = __computeTotalCopyNr($);
-  writer.write({
-    title: title,
-    url: url,
-    library: library,
-    availableCopy: availableCopy,
-    totalCopy: totalCopy,
-  });
-};
-
-const __computeTotalCopyNr = ($) => {
-  let count = 0;
-  const pattern = /\d+$/;
-  $(selector["availableCopy"]).each((i, ele) => {
-    count += parseInt($(ele).text().match(pattern)[0]);
-  });
-  return count;
-};
-
-// ------------ collect urls ------------
+// ---------- general work ----------
 /*
  * For a response obj from an axios call,
  * return a parsed cheerio obj.
@@ -156,41 +131,106 @@ const getParsedPage = (axiosRes) => {
   return cheerio.load(rawPage, null, false);
 };
 
-/*
- * For a cheerio obj (of a page of games), recode a game's URL if the
- * game's title contains `CONSOLE`.
- */
-const _recordGameURLOnPage = ($) => {
-  $(selector["gameTitles"]).each((i, ele) => {
-    if ($(ele).text().includes(CONSOLE)) {
-      gameRecords[$(ele).text()] = $(ele).attr("href");
-    }
-  });
+const handleError = (error) => {
+  if (error.isAxiosError) {
+    console.log(`Axios error`);
+    console.log(`error.config.params: ${error.config.params}`);
+    console.log(`error.config.url: ${error.config.url}`);
+    console.log(
+      `status-statusText: ${error.response.status}: ${error.response.statusText}`
+    );
+  } else {
+    console.log(`non-Axios error`);
+    console.log(`${error.message}`);
+  }
 };
 
+const writeCSV = (gameAvailInfo) => {
+  // prepare file write stream
+  const filename = getTimestampFilename();
+  const csvFile = fs.createWriteStream(filename);
+
+  // prepare csv config
+  const csvStream = format({ headers: true });
+  csvStream.pipe(csvFile).on("end", () => process.exit());
+
+  gameAvailInfo.forEach((record) => {
+    csvStream.write(record);
+  });
+
+  csvStream.end();
+};
+
+const getTimestampFilename = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${
+    now.getMonth() + 1
+  }-${now.getDate()}--${now.getHours()}-${now.getMinutes()}-${now.getSeconds()}.csv`;
+};
+// ---------- work on game list page ----------
 /*
  * From the cheerio obj of the first page,
  * get the number of total pages.
  */
-const _getTotalPages = ($) => {
+const getTotalPages = ($) => {
   const totalPageInfo = $(selector["totalPageInfo"]).text();
   const pattern = /\d+$/;
   return parseInt(totalPageInfo.match(pattern)[0]);
 };
 
-const makeRestPageReqs = (totalPage) => {
-  // TODO: what is ...?
-  const restPageNrs = [...Array(totalPage).keys()]
-    .map((e) => e + 1)
-    .filter((e) => e >= 2);
-
-  // get an array of axios get promise
-  return restPageNrs.map((e) => {
-    return axios.get(`${baseURL}${pageURL}`, {
-      params: {
-        suchbegriff: CONSOLE,
-        "seite-m37": e,
-      },
+const getGameURLsOnPage = ($) => {
+  return $(selector["gameTitles"])
+    .toArray()
+    .map((ele) => {
+      if ($(ele).text().includes(CONSOLE)) {
+        return $(ele).attr("href");
+      }
     });
+};
+
+const getAxiosFromGameURLs = (urls) => {
+  return urls.map((gameURL) => {
+    return axios.get(`${baseURL}${gameURL}`);
   });
 };
+
+// ---------- work on game title page ----------
+const recordAvailableGame = (response) => {
+  const $ = getParsedPage(response);
+  const availLibraries = $(selector["availLibraries"]).toArray();
+  if (availLibraries.length !== 0) {
+    const title = $(selector["title"]).text();
+    // console.log(`game ${title} has >= 1 available copy!`);
+    const url = response.config.url;
+    const totalCopy = computeTotalCopyNr($);
+    availLibraries.forEach((ele) => {
+      makeRecord({
+        title: title,
+        url: url,
+        library: $(ele).find(selector["library"]).text(),
+        availableCopy: $(ele)
+          .find(selector["availableCopy"])
+          .text()
+          .replace("/", " of "),
+        totalCopy: totalCopy,
+      });
+    });
+  }
+};
+
+const computeTotalCopyNr = ($) => {
+  let count = 0;
+  const pattern = /\d+$/;
+  $(selector["availableCopy"]).each((i, ele) => {
+    count += parseInt($(ele).text().match(pattern)[0]);
+  });
+  return count;
+};
+
+const makeRecord = (obj) => {
+  gameAvailInfo.push(obj);
+};
+
+// get url of the request out of a response obj
+// console.log(response.config.url);
+// console.log(response.config.params);

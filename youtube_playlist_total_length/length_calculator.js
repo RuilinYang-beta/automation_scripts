@@ -6,9 +6,15 @@ const getNumVideo = () => {
   );
 };
 
-const getTimeStrings = (numVideo) => {
+const getTimeStrings = (numVideo, start, end) => {
+  // if not specified, compute on all videos of a playlist
+  if (start === undefined) {
+    start = 0;
+    end = numVideo;
+  }
+
   return [...$$("span.style-scope.ytd-thumbnail-overlay-time-status-renderer")]
-    .slice(0, numVideo)
+    .slice(start, end)
     .map((ele) => ele.innerText);
 };
 
@@ -30,14 +36,29 @@ let getTotalTime = (totalSeconds) => {
   return `Total time: ${hours}:${minutes}:${seconds}`;
 };
 
-let start = () => {
+// range is of format [start, end]
+let start = (range) => {
+  let start = undefined;
+  let end = undefined;
+  if (range !== undefined) {
+    [start, end] = range;
+    // transform num starting at 1, to idx starting at 0
+    start--;
+    end--;
+  }
+
   let numVideo = getNumVideo();
-  let timeStrings = getTimeStrings(numVideo);
+  let timeStrings = getTimeStrings(numVideo, start, end);
   let timeInts = getTimeInts(timeStrings);
   let totalSeconds = timeInts.reduce(getTotalSeconds, 0);
-  console.log(
-    `Total duration of ${numVideo} videos: ${getTotalTime(totalSeconds)}`
-  );
+  let totalTime = getTotalTime(totalSeconds);
+
+  let report =
+    range === undefined
+      ? `Total duration of ${numVideo} videos: ${totalTime}`
+      : `Video ${start++} to ${end++} amount to :${totalTime}`;
+
+  console.log(report);
 };
 
 start();
